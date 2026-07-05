@@ -23,6 +23,7 @@ import json
 import os
 import re
 import struct
+import time
 import zlib
 from pathlib import Path
 from typing import Any, Optional
@@ -740,11 +741,24 @@ def _ecosystem_from_air(air: str) -> Optional[str]:
     return parts[2] if len(parts) > 2 else None
 
 
-def _resolve_loras(loras: Optional[dict[str, float]]) -> tuple[dict[str, float], Optional[str]]:
-    """Нормализовать loras -> {air: вес}. Ключ может быть AIR или id версии LoRA.
+# enum-значения (из OpenAPI-спеки imageGen) — для справки/докстрингов
+SDCPP_SAMPLERS = ["euler", "heun", "dpm2", "dpm++2s_a", "dpm++2m", "dpm++2mv2",
+                  "ipndm", "ipndm_v", "ddim_trailing", "euler_a", "lcm",
+                  "res_multistep", "res_2s", "tcd", "er_sde"]
+SDCPP_SCHEDULES = ["simple", "discrete", "karras", "exponential", "ays",
+                   "bong_tangent", "gits", "sgm_uniform", "smoothstep",
+                   "kl_optimal", "lcm"]
+COMFY_SAMPLERS = ["euler", "euler_ancestral", "euler_cfg_pp", "heun", "dpm_2",
+                  "dpm_2_ancestral", "lms", "dpmpp_2s_ancestral", "dpmpp_sde",
+                  "dpmpp_2m", "dpmpp_2m_sde", "dpmpp_3m_sde", "ddpm", "lcm",
+                  "ipndm", "deis", "ddim", "uni_pc", "res_multistep", "er_sde"]
+COMFY_SCHEDULERS = ["normal", "karras", "exponential", "sgm_uniform", "simple",
+                    "ddim_uniform", "beta"]
+UCACHE_MODES = ["off", "normal"]
 
-    id версии резолвится в AIR через API. Возвращает ({air:weight}, error).
-    """
+
+def _resolve_loras(loras: Optional[dict[str, float]]) -> tuple[dict[str, float], Optional[str]]:
+    """Нормализовать loras -> {air: вес}. Ключ может быть AIR или id версии LoRA."""
     if not loras:
         return {}, None
     out: dict[str, float] = {}
@@ -752,27 +766,50 @@ def _resolve_loras(loras: Optional[dict[str, float]]) -> tuple[dict[str, float],
         k = str(key).strip()
         if k.startswith("urn:air:"):
             out[k] = float(weight)
-            continue
-        if k.isdigit():
+        elif k.isdigit():
             air, err = _resolve_air(int(k), None)
             if err:
                 return {}, f"LoRA {k}: {err}"
             out[air] = float(weight)
-            continue
-        return {}, f"некорректный ключ LoRA '{k}' (нужен AIR или id версии)."
+        else:
+            return {}, f"некорректный ключ LoRA '{k}' (нужен AIR или id версии)."
     return out, None
 
 
-def _build_workflow(air: str, ecosystem: str, engine: str, prompt: str,
-                    negative_prompt: Optional[str], width: int, height: int,
-                    steps: int, cfg_scale: float, seed: Optional[int],
-                    quantity: int, clip_skip: Optional[int],
-                    sampler: Optional[str],
-                    loras: Optional[dict[str, float]] = None) -> dict[str, Any]:
+def _resolve_air_list(items: Optional[list]) -> tuple[list[str], Optional[str]]:
+    """Нормализовать список AIR/id версий (для embeddings) -> [air]."""
+    if not items:
+        return [], None
+    out: list[str] = []
+    for it in items:
+        s = str(it).strip()
+        if s.startswith("urn:air:"):
+            out.append(s)
+        elif s.isdigit():
+            air, err = _resolve_air(int(s), None)
+            if err:
+                return [], f"embedding {s}: {err}"
+            out.append(air)
+        else:
+            return [], f"некорректный элемент '{s}' (нужен AIR или id версии)."
+    return out, None
+
+
+def _build_workflow(
+    air: str, ecosystem: str, engine: str, operation: str, prompt: str,
+    negative_prompt: Optional[str], width: int, height: int, steps: int,
+    cfg_scale: float, seed: Optional[int], quantity: int,
+    clip_skip: Optional[int], sampler: Optional[str], scheduler: Optional[str],
+    loras: Optional[dict[str, float]], embeddings: Optional[list[str]],
+    vae_air: Optional[str], ucache: Optional[str],
+    source_image: Optional[str], strength: Optional[float],
+) -> tuple[dict[str, Any], list[str]]:
+    """Собрать workflow под выбранный движок. Возвращает (body, warnings)."""
+    warnings: list[str] = []
     inp: dict[str, Any] = {
         "engine": engine,
         "ecosystem": ecosystem,
-        "operation": "createImage",
+        "operation": operation,
         "model": air,
         "prompt": prompt,
         "width": width,
@@ -785,13 +822,43 @@ def _build_workflow(air: str, ecosystem: str, engine: str, prompt: str,
         inp["negativePrompt"] = negative_prompt
     if seed is not None:
         inp["seed"] = seed
+
+    # clipSkip: только SD1; на SDXL/flux сервер вернёт 400 — снимаем и предупреждаем
     if clip_skip is not None:
-        inp["clipSkip"] = clip_skip
-    if sampler:
-        inp["sampleMethod"] = sampler
+        if ecosystem == "sd1":
+            inp["clipSkip"] = clip_skip
+        else:
+            warnings.append(f"clipSkip не поддерживается ecosystem={ecosystem} — параметр опущен.")
+
+    # сэмплер/планировщик: имена полей зависят от движка
+    if engine == "comfy":
+        if sampler:
+            inp["sampler"] = sampler
+        if scheduler:
+            inp["scheduler"] = scheduler
+    else:  # sdcpp
+        if sampler:
+            inp["sampleMethod"] = sampler
+        if scheduler:
+            inp["schedule"] = scheduler
+        if ucache:
+            inp["uCache"] = ucache
+
     if loras:
-        inp["loras"] = loras  # {air: вес}
-    return {"steps": [{"$type": "imageGen", "input": inp}]}
+        inp["loras"] = loras
+    if embeddings:
+        inp["embeddings"] = embeddings
+    if vae_air:
+        inp["vaeModel"] = vae_air
+
+    # img2img (createVariant): image-URL + сила денойза
+    if operation == "createVariant":
+        if source_image:
+            inp["image"] = source_image
+        if strength is not None:
+            inp["denoiseStrength" if engine == "comfy" else "strength"] = strength
+
+    return {"steps": [{"$type": "imageGen", "input": inp}]}, warnings
 
 
 def _post_workflow(body: dict[str, Any], query: dict[str, Any]) -> httpx.Response:
@@ -819,6 +886,40 @@ def _images_from(resp_json: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _prepare_gen(kw: dict[str, Any]) -> tuple[Optional[dict], Optional[dict], Optional[str]]:
+    """Общая подготовка для estimate/generate. Возвращает (body, meta, error)."""
+    air, err = _resolve_air(kw.get("model_version_id"), kw.get("model_air"))
+    if err:
+        return None, None, err
+    lora_map, lerr = _resolve_loras(kw.get("loras"))
+    if lerr:
+        return None, None, lerr
+    emb_list, eerr = _resolve_air_list(kw.get("embeddings"))
+    if eerr:
+        return None, None, eerr
+    vae_air = kw.get("vae_air")
+    if not vae_air and kw.get("vae_version_id"):
+        vae_air, verr = _resolve_air(kw["vae_version_id"], None)
+        if verr:
+            return None, None, f"VAE: {verr}"
+    eco = kw.get("ecosystem") or _ecosystem_from_air(air)
+    op = kw.get("operation") or "createImage"
+    if op == "createVariant" and not kw.get("source_image"):
+        return None, None, "createVariant (img2img) требует source_image (URL)."
+    body, warns = _build_workflow(
+        air, eco, kw.get("engine", "sdcpp"), op, kw["prompt"],
+        kw.get("negative_prompt"), kw["width"], kw["height"], kw["steps"],
+        kw["cfg_scale"], kw.get("seed"), kw["quantity"], kw.get("clip_skip"),
+        kw.get("sampler"), kw.get("scheduler"), lora_map, emb_list, vae_air,
+        kw.get("ucache"), kw.get("source_image"), kw.get("strength"),
+    )
+    meta = {"air": air, "ecosystem": eco, "operation": op,
+            "engine": kw.get("engine", "sdcpp"),
+            "loras": lora_map or None, "embeddings": emb_list or None,
+            "warnings": warns or None}
+    return body, meta, None
+
+
 @mcp.tool()
 def estimate_generation(
     prompt: str,
@@ -833,39 +934,32 @@ def estimate_generation(
     quantity: int = 1,
     clip_skip: Optional[int] = None,
     sampler: Optional[str] = None,
+    scheduler: Optional[str] = None,
     engine: str = "sdcpp",
     ecosystem: Optional[str] = None,
+    operation: str = "createImage",
     loras: Optional[dict[str, float]] = None,
+    embeddings: Optional[list] = None,
+    vae_air: Optional[str] = None,
+    vae_version_id: Optional[int] = None,
+    ucache: Optional[str] = None,
+    source_image: Optional[str] = None,
+    strength: Optional[float] = None,
 ) -> dict[str, Any]:
     """Оценить стоимость генерации в Buzz (whatif) — БЕЗ списания и без картинки.
 
-    Модель задаётся `model_version_id` (AIR берётся из API) или готовым `model_air`.
-    ecosystem определяется из AIR автоматически (sd1/sdxl/flux1...).
-
-    Args:
-        loras: словарь LoRA -> вес, напр. {"58390@62833": 0.8} или
-            {"urn:air:sd1:lora:civitai:58390@62833": 0.8}. Ключ — AIR или id версии
-            LoRA (резолвится в AIR). Можно несколько. Должны совпадать по ecosystem
-            с чекпойнтом.
+    Принимает те же параметры, что generate_image (см. его докстринг).
 
     Returns:
-        {air, ecosystem, loras, cost:{buzz, insufficientBuzz, breakdown}}.
+        {air, ecosystem, cost:{buzz, insufficientBuzz, breakdown}, warnings}.
     """
-    air, err = _resolve_air(model_version_id, model_air)
+    body, meta, err = _prepare_gen(locals())
     if err:
         return {"status": "error", "error": err}
-    lora_map, lerr = _resolve_loras(loras)
-    if lerr:
-        return {"status": "error", "error": lerr}
-    eco = ecosystem or _ecosystem_from_air(air)
-    body = _build_workflow(air, eco, engine, prompt, negative_prompt, width, height,
-                           steps, cfg_scale, seed, quantity, clip_skip, sampler, lora_map)
     r = _post_workflow(body, {"whatif": "true"})
     if r.status_code >= 400:
         return {"status": "error", "error": f"{r.status_code}: {r.text[:300]}"}
-    j = r.json()
-    return {"air": air, "ecosystem": eco, "loras": lora_map or None,
-            "cost": _cost_from(j)}
+    return {**meta, "cost": _cost_from(r.json())}
 
 
 @mcp.tool()
@@ -882,49 +976,57 @@ def generate_image(
     quantity: int = 1,
     clip_skip: Optional[int] = None,
     sampler: Optional[str] = None,
+    scheduler: Optional[str] = None,
     engine: str = "sdcpp",
     ecosystem: Optional[str] = None,
+    operation: str = "createImage",
     loras: Optional[dict[str, float]] = None,
+    embeddings: Optional[list] = None,
+    vae_air: Optional[str] = None,
+    vae_version_id: Optional[int] = None,
+    ucache: Optional[str] = None,
+    source_image: Optional[str] = None,
+    strength: Optional[float] = None,
     save_dir: Optional[str] = None,
     confirm: bool = False,
     wait: int = 60,
 ) -> dict[str, Any]:
-    """Сгенерировать изображение через Civitai Orchestration API. ТРАТИТ BUZZ.
+    """Полноценная генерация изображения через Civitai Orchestration API. ТРАТИТ BUZZ.
 
-    ЗАЩИТА: без confirm=true инструмент НЕ генерирует — только возвращает
-    предполагаемую стоимость (whatif). Чтобы реально запустить и списать Buzz,
-    вызовите повторно с confirm=true.
+    ЗАЩИТА: без confirm=true НЕ генерирует — только возвращает whatif-стоимость.
+    Для реального запуска — повторный вызов с confirm=true.
 
-    Модель: `model_version_id` (AIR из API) или готовый `model_air`.
-    Если задан `save_dir` — готовые картинки скачиваются туда; в ответе и пути, и URL.
+    Модель: `model_version_id` (AIR из API) или готовый `model_air`. ecosystem
+    (sd1/sdxl/flux1) определяется из AIR; можно переопределить.
 
     Args:
-        prompt: позитивный промпт.
-        model_version_id / model_air: какая модель (одно из).
-        negative_prompt, width, height, steps, cfg_scale, seed, quantity: параметры.
-        clip_skip, sampler, engine, ecosystem: доп. настройки (ecosystem авто из AIR).
-        loras: словарь LoRA -> вес, напр. {"58390@62833": 0.8}. Ключ — AIR или id
-            версии LoRA (резолвится в AIR). Можно несколько; ecosystem LoRA должен
-            совпадать с чекпойнтом (sd1/sdxl/…). Триггер-слова LoRA добавляйте в prompt.
-        save_dir: папка для скачивания результатов (опц.).
-        confirm: ОБЯЗАТЕЛЬНО true для реального запуска (иначе только оценка стоимости).
-        wait: сколько секунд держать соединение до поллинга (по умолчанию 60).
+        prompt / negative_prompt: промпты (≤10000 симв).
+        width / height: 64–2048, кратно 16 (SD1 нативно 512², SDXL 1024²).
+        steps: 1–150. cfg_scale: 0–30 (6–8 обычно). seed: int64, фикс для повтора.
+        quantity: 1–12 картинок за вызов.
+        engine: 'sdcpp' (по умолчанию) или 'comfy' (свои энумы сэмплеров).
+        sampler: sdcpp — euler/dpm++2m/lcm/…; comfy — euler_ancestral/dpmpp_2m/…
+            (полные списки: SDCPP_SAMPLERS / COMFY_SAMPLERS).
+        scheduler: sdcpp — discrete/karras/…; comfy — normal/karras/…
+        clip_skip: только SD1 (на SDXL/flux опускается автоматически, см. warnings).
+        loras: {ключ: вес}, ключ — AIR или id версии LoRA. Несколько — можно.
+        embeddings: список AIR/id версий (textual inversion); имена — в prompt.
+        vae_air / vae_version_id: переопределить VAE.
+        ucache: 'off'/'normal' (только sdcpp).
+        operation: 'createImage' (t2i) или 'createVariant' (img2img — нужен source_image).
+        source_image: URL исходника для img2img. strength: 0–1 (0.6–0.8 обычно).
+        save_dir: куда скачать результат (опц.). confirm: true для запуска.
+        wait: сек держать соединение до поллинга.
 
     Returns:
-        confirm=false → {status:'preview', cost, hint};
+        confirm=false → {status:'preview', cost, warnings, hint};
         confirm=true  → {status, workflowId, cost, images:[{id,url,path?}]}.
     """
     if not _api_key():
         return {"status": "error", "error": "CIVITAI_API_KEY не задан."}
-    air, err = _resolve_air(model_version_id, model_air)
+    body, meta, err = _prepare_gen(locals())
     if err:
         return {"status": "error", "error": err}
-    lora_map, lerr = _resolve_loras(loras)
-    if lerr:
-        return {"status": "error", "error": lerr}
-    eco = ecosystem or _ecosystem_from_air(air)
-    body = _build_workflow(air, eco, engine, prompt, negative_prompt, width, height,
-                           steps, cfg_scale, seed, quantity, clip_skip, sampler, lora_map)
 
     # всегда сначала whatif — узнать цену и хватает ли Buzz
     wr = _post_workflow(body, {"whatif": "true"})
@@ -934,8 +1036,7 @@ def generate_image(
 
     if not confirm:
         return {
-            "status": "preview",
-            "air": air, "ecosystem": eco, "cost": cost,
+            "status": "preview", **meta, "cost": cost,
             "hint": f"генерация спишет ~{cost['buzz']} Buzz; "
                     "вызовите снова с confirm=true для запуска.",
         }
@@ -953,6 +1054,8 @@ def generate_image(
         "cost": _cost_from(j) or cost,
         "images": _images_from(j),
     }
+    if meta.get("warnings"):
+        result["warnings"] = meta["warnings"]
 
     if save_dir and result["images"]:
         dest = Path(save_dir)
@@ -966,13 +1069,22 @@ def generate_image(
                     if not (img.get("id") or "").endswith((".jpg", ".png", ".jpeg")) \
                     else os.path.basename(img["id"])
                 path = dest / name
-                try:
-                    resp = c.get(url)
-                    resp.raise_for_status()
-                    path.write_bytes(resp.content)
-                    img["path"] = str(path)
-                except Exception as e:
-                    img["download_error"] = str(e)
+                # CDN blob иногда отдаёт временный 5xx — ретраим
+                last_err = None
+                for attempt in range(4):
+                    try:
+                        resp = c.get(url)
+                        resp.raise_for_status()
+                        path.write_bytes(resp.content)
+                        img["path"] = str(path)
+                        last_err = None
+                        break
+                    except Exception as e:
+                        last_err = str(e)
+                        time.sleep(1.5 * (attempt + 1))
+                if last_err:
+                    img["download_error"] = last_err
+                    img["hint"] = "URL действителен; повторите get_workflow(workflowId) или скачайте по url."
 
     if result["status"] not in ("succeeded", None) and not result["images"]:
         result["hint"] = ("не готово за wait сек — опросите get_workflow(workflowId).")

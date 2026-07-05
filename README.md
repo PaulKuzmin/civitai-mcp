@@ -94,16 +94,45 @@ get_workflow(workflow_id)                            → статус/карти
 
 Ориентир по цене: SD1.5 512×512 / 20 шагов ≈ 4 Buzz, SDXL 1024×1024 / 25 шагов ≈ 10 Buzz.
 
-**LoRA** (одна или несколько) — параметр `loras` как словарь `LoRA → вес`:
+#### Полный набор параметров `generate_image` / `estimate_generation`
+
+| Параметр | Описание |
+|---|---|
+| `prompt` / `negative_prompt` | промпты (≤10000 симв) |
+| `width` / `height` | 64–2048, кратно 16 (SD1 нативно 512², SDXL 1024²) |
+| `steps` (1–150), `cfg_scale` (0–30), `seed` | базовые |
+| `quantity` | 1–12 картинок за вызов |
+| `engine` | `sdcpp` (по умолч.) или `comfy` |
+| `sampler` | sdcpp: `euler`,`dpm++2m`,`lcm`,… / comfy: `euler_ancestral`,`dpmpp_2m`,… |
+| `scheduler` | sdcpp: `discrete`,`karras`,… / comfy: `normal`,`karras`,`beta`,… |
+| `clip_skip` | только SD1 (на SDXL/flux опускается автоматически → `warnings`) |
+| `loras` | `{ключ: вес}`; ключ — AIR или id версии LoRA; несколько — можно |
+| `embeddings` | список AIR/id версий (textual inversion); имена — в `prompt` |
+| `vae_air` / `vae_version_id` | переопределить VAE |
+| `ucache` | `off`/`normal` (только sdcpp) |
+| `operation` | `createImage` (t2i) или `createVariant` (img2img) |
+| `source_image` / `strength` | для img2img: URL исходника + сила денойза (0–1) |
+| `save_dir`, `confirm`, `wait` | скачивание / запуск / поллинг |
+
+Движки различаются именами полей — MCP подставляет их сам: `sampler`↔`sampleMethod`,
+`scheduler`↔`schedule`, `strength`↔`denoiseStrength`. Скачивание результата ретраит
+временные 5xx CDN.
+
+**LoRA** — несколько сразу:
 
 ```
 generate_image(prompt, model_version_id=128713,
   loras={"62833": 0.8, "urn:air:sd1:lora:civitai:82098@87153": 0.5}, confirm=true)
 ```
 
-Ключ — либо id версии LoRA (резолвится в AIR автоматически), либо готовый AIR.
-Все LoRA должны быть той же экосистемы, что и чекпойнт (sd1 к sd1, sdxl к sdxl).
-Триггер-слова LoRA, если нужны, добавляйте в `prompt`.
+**img2img**:
+
+```
+generate_image(prompt="daytime, clear sky", model_version_id=128713,
+  operation="createVariant", source_image="https://.../src.jpeg", strength=0.6, confirm=true)
+```
+
+LoRA/embeddings/VAE должны быть той же экосистемы, что и чекпойнт (sd1↔sd1, sdxl↔sdxl).
 
 ### Баланс Buzz
 
