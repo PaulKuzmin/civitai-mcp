@@ -24,6 +24,7 @@ from mcp.server.fastmcp import FastMCP
 
 API_BASE = "https://civitai.com/api/v1"
 DOWNLOAD_BASE = "https://civitai.com/api/download/models"
+TRPC_BASE = "https://civitai.com/api/trpc"  # внутренний, неофициальный
 
 mcp = FastMCP("civitai")
 
@@ -697,6 +698,48 @@ def get_image_meta(image_id: int, nsfw: Optional[str] = None) -> dict[str, Any]:
         "nsfwLevel": i.get("nsfwLevel"),
         "meta": i.get("meta"),
         "meta_available": bool(i.get("meta")),
+    }
+
+
+@mcp.tool()
+def get_buzz_balance() -> dict[str, Any]:
+    """Баланс Buzz текущего аккаунта (по ключу CIVITAI_API_KEY).
+
+    ⚠️ НЕОФИЦИАЛЬНО: использует ВНУТРЕННИЙ tRPC-эндпоинт сайта civitai.com
+    (buzz.getBuzzAccount), а НЕ публичный /api/v1. Он не документирован и может
+    измениться/перестать работать в любой момент без предупреждения.
+
+    Returns:
+        {userId, username, balance:{yellow,blue,green}, total, note} либо ошибку.
+    """
+    if not _api_key():
+        return {"status": "error", "error": "CIVITAI_API_KEY не задан."}
+
+    with _client() as c:
+        me = c.get(f"{API_BASE}/me")
+        me.raise_for_status()
+        me_data = me.json()
+        user_id = me_data.get("id")
+        if not user_id:
+            return {"status": "error", "error": "не удалось определить userId из /me."}
+
+        inp = json.dumps({"json": {"accountId": user_id, "accountType": "user"}},
+                         separators=(",", ":"))
+        r = c.get(f"{TRPC_BASE}/buzz.getBuzzAccount", params={"input": inp})
+        if r.status_code != 200:
+            return {"status": "error",
+                    "error": f"{r.status_code} от внутреннего tRPC — эндпоинт мог измениться."}
+        data = (((r.json() or {}).get("result") or {}).get("data") or {}).get("json") or {}
+
+    yellow = data.get("yellow", 0)
+    blue = data.get("blue", 0)
+    green = data.get("green", 0)
+    return {
+        "userId": user_id,
+        "username": me_data.get("username"),
+        "balance": {"yellow": yellow, "blue": blue, "green": green},
+        "total": yellow + blue + green,
+        "note": "неофициальный внутренний tRPC-эндпоинт; может перестать работать.",
     }
 
 

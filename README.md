@@ -35,6 +35,7 @@
 | `download_model` | скачать файл версии в `dest_dir`; опц. `file_type`/`file_format`/`size`/`fp`, `overwrite`, `max_mb` |
 | `read_image_params` | параметры генерации из **локального** файла (PNG A1111/ComfyUI, EXIF), офлайн |
 | `get_image_meta` | параметры генерации картинки, размещённой **на Civitai**, по её id |
+| `get_buzz_balance` | баланс Buzz аккаунта (yellow/blue/green) — ⚠️ неофициальный эндпоинт |
 
 Типовой сценарий: `search_models` → посмотреть `preview`/`get_model_images` →
 выбрать `version.id` → `download_model(version_id, dest_dir)` **или** `get_download_url(version_id)`.
@@ -67,6 +68,15 @@
   и `page_url` (постоянная страница модели).
 - `download_model(..., max_mb=200)` — если файл больше лимита, вернёт
   `status: "too_large"` с `direct_url` вместо загрузки на диск.
+
+### Баланс Buzz
+
+`get_buzz_balance()` возвращает балансы кошельков (`yellow`/`blue`/`green`) текущего
+аккаунта по ключу.
+
+> ⚠️ **Неофициально.** Использует внутренний tRPC-эндпоинт сайта (`buzz.getBuzzAccount`),
+> а не публичный `/api/v1`. Он не документирован и может перестать работать без
+> предупреждения — в отличие от остальных инструментов.
 
 ## Установка
 
