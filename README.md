@@ -76,7 +76,8 @@
 
 Официальный [Civitai Orchestration API](https://developer.civitai.com/orchestration/).
 Модель задаётся `model_version_id` (AIR берётся из API автоматически) или готовым
-`model_air`; `ecosystem` (sd1/sdxl/flux1…) определяется из AIR.
+`model_air`; `ecosystem` (sd1/sdxl/flux1…) определяется из AIR. Готовый AIR версии
+также виден в поле `air` ответа `get_model_version`.
 
 > ⚠️ **Генерация тратит реальный Buzz.** `generate_image` без `confirm=true`
 > **не запускает** генерацию — только возвращает предполагаемую стоимость (whatif).

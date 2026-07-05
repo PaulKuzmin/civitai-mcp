@@ -207,8 +207,11 @@ def get_model(model_id: int) -> dict[str, Any]:
     """
     with _client() as c:
         r = c.get(f"{API_BASE}/models/{model_id}")
-        r.raise_for_status()
-        m = r.json()
+    if r.status_code == 404:
+        return {"status": "not_found", "note": f"модель {model_id} не найдена."}
+    if r.status_code >= 400:
+        return {"status": "error", "error": f"{r.status_code}: {r.text[:200]}"}
+    m = r.json()
 
     return {
         "id": m.get("id"),
@@ -232,14 +235,18 @@ def get_model_version(version_id: int) -> dict[str, Any]:
     """
     with _client() as c:
         r = c.get(f"{API_BASE}/model-versions/{version_id}")
-        r.raise_for_status()
-        v = r.json()
+    if r.status_code == 404:
+        return {"status": "not_found", "note": f"версия {version_id} не найдена."}
+    if r.status_code >= 400:
+        return {"status": "error", "error": f"{r.status_code}: {r.text[:200]}"}
+    v = r.json()
 
     return {
         "id": v.get("id"),
         "modelId": v.get("modelId"),
         "name": v.get("name"),
         "baseModel": v.get("baseModel"),
+        "air": v.get("air"),  # для generate_image / estimate_generation
         "downloadUrl": v.get("downloadUrl"),
         "files": [_slim_file(f) for f in (v.get("files") or [])],
         "images": [_slim_image(i) for i in (v.get("images") or [])],
