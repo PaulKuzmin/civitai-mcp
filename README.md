@@ -36,6 +36,9 @@
 | `read_image_params` | параметры генерации из **локального** файла (PNG A1111/ComfyUI, EXIF), офлайн |
 | `get_image_meta` | параметры генерации картинки, размещённой **на Civitai**, по её id |
 | `get_buzz_balance` | баланс Buzz аккаунта (yellow/blue/green) — ⚠️ неофициальный эндпоинт |
+| `estimate_generation` | оценить стоимость генерации в Buzz (whatif), без списания |
+| `generate_image` | сгенерировать картинку (Orchestration API); **тратит Buzz**, требует `confirm=true` |
+| `get_workflow` | статус/результат генерации по `workflowId` (поллинг) |
 
 Типовой сценарий: `search_models` → посмотреть `preview`/`get_model_images` →
 выбрать `version.id` → `download_model(version_id, dest_dir)` **или** `get_download_url(version_id)`.
@@ -68,6 +71,27 @@
   и `page_url` (постоянная страница модели).
 - `download_model(..., max_mb=200)` — если файл больше лимита, вернёт
   `status: "too_large"` с `direct_url` вместо загрузки на диск.
+
+### Генерация изображений
+
+Официальный [Civitai Orchestration API](https://developer.civitai.com/orchestration/).
+Модель задаётся `model_version_id` (AIR берётся из API автоматически) или готовым
+`model_air`; `ecosystem` (sd1/sdxl/flux1…) определяется из AIR.
+
+> ⚠️ **Генерация тратит реальный Buzz.** `generate_image` без `confirm=true`
+> **не запускает** генерацию — только возвращает предполагаемую стоимость (whatif).
+> Для реального запуска — повторный вызов с `confirm=true`. Проверка баланса
+> и `insufficientBuzz` выполняется до списания.
+
+```
+estimate_generation(prompt, model_version_id=…)      → {cost:{buzz, insufficientBuzz}}
+generate_image(prompt, model_version_id=…)           → preview со стоимостью (confirm=false)
+generate_image(prompt, model_version_id=…, save_dir=…, confirm=true)
+                                                     → {status, workflowId, images:[{url, path}]}
+get_workflow(workflow_id)                            → статус/картинки для долгих задач
+```
+
+Ориентир по цене: SD1.5 512×512 / 20 шагов ≈ 4 Buzz, SDXL 1024×1024 / 25 шагов ≈ 10 Buzz.
 
 ### Баланс Buzz
 

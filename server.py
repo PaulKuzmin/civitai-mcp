@@ -4,7 +4,15 @@
   - search_models         — поиск моделей (query/type/baseModel/sort)
   - get_model             — карточка модели: версии и файлы
   - get_model_version     — детали конкретной версии (+ downloadUrl)
+  - get_model_images      — галерея примеров генерации
+  - get_download_url      — прямая ссылка на файл (для больших моделей)
   - download_model        — скачать файл версии в указанную папку
+  - read_image_params     — параметры генерации из локального файла (офлайн)
+  - get_image_meta        — параметры генерации картинки с Civitai по id
+  - get_buzz_balance      — баланс Buzz (⚠️ неофициальный эндпоинт)
+  - estimate_generation   — оценка стоимости генерации (whatif)
+  - generate_image        — генерация (Orchestration API, тратит Buzz, confirm=true)
+  - get_workflow          — статус/результат генерации по workflowId
 
 Ключ берётся из env CIVITAI_API_KEY, с fallback на apikey.txt рядом со скриптом.
 """
@@ -25,6 +33,7 @@ from mcp.server.fastmcp import FastMCP
 API_BASE = "https://civitai.com/api/v1"
 DOWNLOAD_BASE = "https://civitai.com/api/download/models"
 TRPC_BASE = "https://civitai.com/api/trpc"  # внутренний, неофициальный
+ORCHESTRATION = "https://orchestration.civitai.com/v2/consumer/workflows"
 
 mcp = FastMCP("civitai")
 
@@ -699,6 +708,243 @@ def get_image_meta(image_id: int, nsfw: Optional[str] = None) -> dict[str, Any]:
         "meta": i.get("meta"),
         "meta_available": bool(i.get("meta")),
     }
+
+
+# ---- генерация изображений (Civitai Orchestration API) -------------------
+
+def _resolve_air(model_version_id: Optional[int], model_air: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """Вернуть (air, error). air из готового поля версии или переданной строки."""
+    if model_air:
+        return model_air, None
+    if model_version_id:
+        with _client() as c:
+            r = c.get(f"{API_BASE}/model-versions/{model_version_id}")
+            if r.status_code != 200:
+                return None, f"версия {model_version_id} не найдена ({r.status_code})."
+            air = r.json().get("air")
+            if not air:
+                return None, f"у версии {model_version_id} нет поля air (генерация недоступна)."
+            return air, None
+    return None, "нужен model_version_id или model_air."
+
+
+def _ecosystem_from_air(air: str) -> Optional[str]:
+    parts = air.split(":")
+    return parts[2] if len(parts) > 2 else None
+
+
+def _build_workflow(air: str, ecosystem: str, engine: str, prompt: str,
+                    negative_prompt: Optional[str], width: int, height: int,
+                    steps: int, cfg_scale: float, seed: Optional[int],
+                    quantity: int, clip_skip: Optional[int],
+                    sampler: Optional[str]) -> dict[str, Any]:
+    inp: dict[str, Any] = {
+        "engine": engine,
+        "ecosystem": ecosystem,
+        "operation": "createImage",
+        "model": air,
+        "prompt": prompt,
+        "width": width,
+        "height": height,
+        "steps": steps,
+        "cfgScale": cfg_scale,
+        "quantity": quantity,
+    }
+    if negative_prompt:
+        inp["negativePrompt"] = negative_prompt
+    if seed is not None:
+        inp["seed"] = seed
+    if clip_skip is not None:
+        inp["clipSkip"] = clip_skip
+    if sampler:
+        inp["sampleMethod"] = sampler
+    return {"steps": [{"$type": "imageGen", "input": inp}]}
+
+
+def _post_workflow(body: dict[str, Any], query: dict[str, Any]) -> httpx.Response:
+    with httpx.Client(headers=_headers(), timeout=180.0, follow_redirects=True) as c:
+        return c.post(ORCHESTRATION, params=query, json=body)
+
+
+def _cost_from(resp_json: dict[str, Any]) -> dict[str, Any]:
+    tx = (resp_json.get("transactions") or {})
+    debits = [t for t in tx.get("list", []) if t.get("type") == "debit"]
+    return {
+        "buzz": sum(t.get("amount", 0) for t in debits),
+        "breakdown": debits,
+        "insufficientBuzz": tx.get("insufficientBuzz", False),
+    }
+
+
+def _images_from(resp_json: dict[str, Any]) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for st in resp_json.get("steps", []):
+        for img in ((st.get("output") or {}).get("images") or []):
+            out.append({"id": img.get("id"), "url": img.get("url"),
+                        "available": img.get("available"),
+                        "width": img.get("width"), "height": img.get("height")})
+    return out
+
+
+@mcp.tool()
+def estimate_generation(
+    prompt: str,
+    model_version_id: Optional[int] = None,
+    model_air: Optional[str] = None,
+    negative_prompt: Optional[str] = None,
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 25,
+    cfg_scale: float = 6.0,
+    seed: Optional[int] = None,
+    quantity: int = 1,
+    clip_skip: Optional[int] = None,
+    sampler: Optional[str] = None,
+    engine: str = "sdcpp",
+    ecosystem: Optional[str] = None,
+) -> dict[str, Any]:
+    """Оценить стоимость генерации в Buzz (whatif) — БЕЗ списания и без картинки.
+
+    Модель задаётся `model_version_id` (AIR берётся из API) или готовым `model_air`.
+    ecosystem определяется из AIR автоматически (sd1/sdxl/flux1...).
+
+    Returns:
+        {air, ecosystem, cost:{buzz, insufficientBuzz, breakdown}}.
+    """
+    air, err = _resolve_air(model_version_id, model_air)
+    if err:
+        return {"status": "error", "error": err}
+    eco = ecosystem or _ecosystem_from_air(air)
+    body = _build_workflow(air, eco, engine, prompt, negative_prompt, width, height,
+                           steps, cfg_scale, seed, quantity, clip_skip, sampler)
+    r = _post_workflow(body, {"whatif": "true"})
+    if r.status_code >= 400:
+        return {"status": "error", "error": f"{r.status_code}: {r.text[:300]}"}
+    j = r.json()
+    return {"air": air, "ecosystem": eco, "cost": _cost_from(j)}
+
+
+@mcp.tool()
+def generate_image(
+    prompt: str,
+    model_version_id: Optional[int] = None,
+    model_air: Optional[str] = None,
+    negative_prompt: Optional[str] = None,
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 25,
+    cfg_scale: float = 6.0,
+    seed: Optional[int] = None,
+    quantity: int = 1,
+    clip_skip: Optional[int] = None,
+    sampler: Optional[str] = None,
+    engine: str = "sdcpp",
+    ecosystem: Optional[str] = None,
+    save_dir: Optional[str] = None,
+    confirm: bool = False,
+    wait: int = 60,
+) -> dict[str, Any]:
+    """Сгенерировать изображение через Civitai Orchestration API. ТРАТИТ BUZZ.
+
+    ЗАЩИТА: без confirm=true инструмент НЕ генерирует — только возвращает
+    предполагаемую стоимость (whatif). Чтобы реально запустить и списать Buzz,
+    вызовите повторно с confirm=true.
+
+    Модель: `model_version_id` (AIR из API) или готовый `model_air`.
+    Если задан `save_dir` — готовые картинки скачиваются туда; в ответе и пути, и URL.
+
+    Args:
+        prompt: позитивный промпт.
+        model_version_id / model_air: какая модель (одно из).
+        negative_prompt, width, height, steps, cfg_scale, seed, quantity: параметры.
+        clip_skip, sampler, engine, ecosystem: доп. настройки (ecosystem авто из AIR).
+        save_dir: папка для скачивания результатов (опц.).
+        confirm: ОБЯЗАТЕЛЬНО true для реального запуска (иначе только оценка стоимости).
+        wait: сколько секунд держать соединение до поллинга (по умолчанию 60).
+
+    Returns:
+        confirm=false → {status:'preview', cost, hint};
+        confirm=true  → {status, workflowId, cost, images:[{id,url,path?}]}.
+    """
+    if not _api_key():
+        return {"status": "error", "error": "CIVITAI_API_KEY не задан."}
+    air, err = _resolve_air(model_version_id, model_air)
+    if err:
+        return {"status": "error", "error": err}
+    eco = ecosystem or _ecosystem_from_air(air)
+    body = _build_workflow(air, eco, engine, prompt, negative_prompt, width, height,
+                           steps, cfg_scale, seed, quantity, clip_skip, sampler)
+
+    # всегда сначала whatif — узнать цену и хватает ли Buzz
+    wr = _post_workflow(body, {"whatif": "true"})
+    if wr.status_code >= 400:
+        return {"status": "error", "error": f"whatif {wr.status_code}: {wr.text[:300]}"}
+    cost = _cost_from(wr.json())
+
+    if not confirm:
+        return {
+            "status": "preview",
+            "air": air, "ecosystem": eco, "cost": cost,
+            "hint": f"генерация спишет ~{cost['buzz']} Buzz; "
+                    "вызовите снова с confirm=true для запуска.",
+        }
+    if cost.get("insufficientBuzz"):
+        return {"status": "error", "error": "недостаточно Buzz.", "cost": cost}
+
+    # реальный запуск
+    rr = _post_workflow(body, {"wait": wait})
+    if rr.status_code >= 400:
+        return {"status": "error", "error": f"generate {rr.status_code}: {rr.text[:300]}"}
+    j = rr.json()
+    result: dict[str, Any] = {
+        "status": j.get("status"),
+        "workflowId": j.get("id"),
+        "cost": _cost_from(j) or cost,
+        "images": _images_from(j),
+    }
+
+    if save_dir and result["images"]:
+        dest = Path(save_dir)
+        dest.mkdir(parents=True, exist_ok=True)
+        with httpx.Client(timeout=None, follow_redirects=True) as c:
+            for img in result["images"]:
+                url = img.get("url")
+                if not url or img.get("available") is False:
+                    continue
+                name = os.path.basename((img.get("id") or "image") + ".jpg") \
+                    if not (img.get("id") or "").endswith((".jpg", ".png", ".jpeg")) \
+                    else os.path.basename(img["id"])
+                path = dest / name
+                try:
+                    resp = c.get(url)
+                    resp.raise_for_status()
+                    path.write_bytes(resp.content)
+                    img["path"] = str(path)
+                except Exception as e:
+                    img["download_error"] = str(e)
+
+    if result["status"] not in ("succeeded", None) and not result["images"]:
+        result["hint"] = ("не готово за wait сек — опросите get_workflow(workflowId).")
+    return result
+
+
+@mcp.tool()
+def get_workflow(workflow_id: str) -> dict[str, Any]:
+    """Статус и результат ранее запущенной генерации по workflowId (поллинг).
+
+    Args:
+        workflow_id: id из ответа generate_image.
+
+    Returns:
+        {status, images:[{id,url}]}.
+    """
+    with httpx.Client(headers=_headers(), timeout=60.0, follow_redirects=True) as c:
+        r = c.get(f"{ORCHESTRATION}/{workflow_id}")
+    if r.status_code >= 400:
+        return {"status": "error", "error": f"{r.status_code}: {r.text[:200]}"}
+    j = r.json()
+    return {"status": j.get("status"), "workflowId": j.get("id"),
+            "images": _images_from(j)}
 
 
 @mcp.tool()
