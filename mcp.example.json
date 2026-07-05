@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "civitai": {
+      "command": "H:/CivitaiMcp/.venv/Scripts/python.exe",
+      "args": ["H:/CivitaiMcp/server.py"],
+      "env": {
+        "CIVITAI_API_KEY": "PUT-YOUR-KEY-HERE"
+      }
+    }
+  }
+}
