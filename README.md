@@ -94,6 +94,17 @@ get_workflow(workflow_id)                            → статус/карти
 
 Ориентир по цене: SD1.5 512×512 / 20 шагов ≈ 4 Buzz, SDXL 1024×1024 / 25 шагов ≈ 10 Buzz.
 
+**LoRA** (одна или несколько) — параметр `loras` как словарь `LoRA → вес`:
+
+```
+generate_image(prompt, model_version_id=128713,
+  loras={"62833": 0.8, "urn:air:sd1:lora:civitai:82098@87153": 0.5}, confirm=true)
+```
+
+Ключ — либо id версии LoRA (резолвится в AIR автоматически), либо готовый AIR.
+Все LoRA должны быть той же экосистемы, что и чекпойнт (sd1 к sd1, sdxl к sdxl).
+Триггер-слова LoRA, если нужны, добавляйте в `prompt`.
+
 ### Баланс Buzz
 
 `get_buzz_balance()` возвращает балансы кошельков (`yellow`/`blue`/`green`) текущего

@@ -740,11 +740,35 @@ def _ecosystem_from_air(air: str) -> Optional[str]:
     return parts[2] if len(parts) > 2 else None
 
 
+def _resolve_loras(loras: Optional[dict[str, float]]) -> tuple[dict[str, float], Optional[str]]:
+    """Нормализовать loras -> {air: вес}. Ключ может быть AIR или id версии LoRA.
+
+    id версии резолвится в AIR через API. Возвращает ({air:weight}, error).
+    """
+    if not loras:
+        return {}, None
+    out: dict[str, float] = {}
+    for key, weight in loras.items():
+        k = str(key).strip()
+        if k.startswith("urn:air:"):
+            out[k] = float(weight)
+            continue
+        if k.isdigit():
+            air, err = _resolve_air(int(k), None)
+            if err:
+                return {}, f"LoRA {k}: {err}"
+            out[air] = float(weight)
+            continue
+        return {}, f"некорректный ключ LoRA '{k}' (нужен AIR или id версии)."
+    return out, None
+
+
 def _build_workflow(air: str, ecosystem: str, engine: str, prompt: str,
                     negative_prompt: Optional[str], width: int, height: int,
                     steps: int, cfg_scale: float, seed: Optional[int],
                     quantity: int, clip_skip: Optional[int],
-                    sampler: Optional[str]) -> dict[str, Any]:
+                    sampler: Optional[str],
+                    loras: Optional[dict[str, float]] = None) -> dict[str, Any]:
     inp: dict[str, Any] = {
         "engine": engine,
         "ecosystem": ecosystem,
@@ -765,6 +789,8 @@ def _build_workflow(air: str, ecosystem: str, engine: str, prompt: str,
         inp["clipSkip"] = clip_skip
     if sampler:
         inp["sampleMethod"] = sampler
+    if loras:
+        inp["loras"] = loras  # {air: вес}
     return {"steps": [{"$type": "imageGen", "input": inp}]}
 
 
@@ -809,26 +835,37 @@ def estimate_generation(
     sampler: Optional[str] = None,
     engine: str = "sdcpp",
     ecosystem: Optional[str] = None,
+    loras: Optional[dict[str, float]] = None,
 ) -> dict[str, Any]:
     """Оценить стоимость генерации в Buzz (whatif) — БЕЗ списания и без картинки.
 
     Модель задаётся `model_version_id` (AIR берётся из API) или готовым `model_air`.
     ecosystem определяется из AIR автоматически (sd1/sdxl/flux1...).
 
+    Args:
+        loras: словарь LoRA -> вес, напр. {"58390@62833": 0.8} или
+            {"urn:air:sd1:lora:civitai:58390@62833": 0.8}. Ключ — AIR или id версии
+            LoRA (резолвится в AIR). Можно несколько. Должны совпадать по ecosystem
+            с чекпойнтом.
+
     Returns:
-        {air, ecosystem, cost:{buzz, insufficientBuzz, breakdown}}.
+        {air, ecosystem, loras, cost:{buzz, insufficientBuzz, breakdown}}.
     """
     air, err = _resolve_air(model_version_id, model_air)
     if err:
         return {"status": "error", "error": err}
+    lora_map, lerr = _resolve_loras(loras)
+    if lerr:
+        return {"status": "error", "error": lerr}
     eco = ecosystem or _ecosystem_from_air(air)
     body = _build_workflow(air, eco, engine, prompt, negative_prompt, width, height,
-                           steps, cfg_scale, seed, quantity, clip_skip, sampler)
+                           steps, cfg_scale, seed, quantity, clip_skip, sampler, lora_map)
     r = _post_workflow(body, {"whatif": "true"})
     if r.status_code >= 400:
         return {"status": "error", "error": f"{r.status_code}: {r.text[:300]}"}
     j = r.json()
-    return {"air": air, "ecosystem": eco, "cost": _cost_from(j)}
+    return {"air": air, "ecosystem": eco, "loras": lora_map or None,
+            "cost": _cost_from(j)}
 
 
 @mcp.tool()
@@ -847,6 +884,7 @@ def generate_image(
     sampler: Optional[str] = None,
     engine: str = "sdcpp",
     ecosystem: Optional[str] = None,
+    loras: Optional[dict[str, float]] = None,
     save_dir: Optional[str] = None,
     confirm: bool = False,
     wait: int = 60,
@@ -865,6 +903,9 @@ def generate_image(
         model_version_id / model_air: какая модель (одно из).
         negative_prompt, width, height, steps, cfg_scale, seed, quantity: параметры.
         clip_skip, sampler, engine, ecosystem: доп. настройки (ecosystem авто из AIR).
+        loras: словарь LoRA -> вес, напр. {"58390@62833": 0.8}. Ключ — AIR или id
+            версии LoRA (резолвится в AIR). Можно несколько; ecosystem LoRA должен
+            совпадать с чекпойнтом (sd1/sdxl/…). Триггер-слова LoRA добавляйте в prompt.
         save_dir: папка для скачивания результатов (опц.).
         confirm: ОБЯЗАТЕЛЬНО true для реального запуска (иначе только оценка стоимости).
         wait: сколько секунд держать соединение до поллинга (по умолчанию 60).
@@ -878,9 +919,12 @@ def generate_image(
     air, err = _resolve_air(model_version_id, model_air)
     if err:
         return {"status": "error", "error": err}
+    lora_map, lerr = _resolve_loras(loras)
+    if lerr:
+        return {"status": "error", "error": lerr}
     eco = ecosystem or _ecosystem_from_air(air)
     body = _build_workflow(air, eco, engine, prompt, negative_prompt, width, height,
-                           steps, cfg_scale, seed, quantity, clip_skip, sampler)
+                           steps, cfg_scale, seed, quantity, clip_skip, sampler, lora_map)
 
     # всегда сначала whatif — узнать цену и хватает ли Buzz
     wr = _post_workflow(body, {"whatif": "true"})
