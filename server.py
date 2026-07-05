@@ -836,6 +836,8 @@ def _build_workflow(
             inp["sampler"] = sampler
         if scheduler:
             inp["scheduler"] = scheduler
+        if ucache:
+            warnings.append("uCache поддерживается только engine=sdcpp — параметр опущен.")
     else:  # sdcpp
         if sampler:
             inp["sampleMethod"] = sampler
