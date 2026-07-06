@@ -23,6 +23,27 @@ This skill drives the **`civitai` MCP** (`generate_image`, `estimate_generation`
 
 ---
 
+## How to work with these tools (read first)
+
+- **Batch independent calls in parallel.** When several MCP calls don't depend on each
+  other, issue them in ONE turn instead of one-by-one. Examples: comparing candidates →
+  `get_model_version` for 3 versions at once; scouting families → `search_models` for
+  Checkpoint **and** LoRA in parallel; `get_model_images` for two models side by side;
+  `estimate_generation` for two settings at once. Only serialize when a call needs the
+  previous call's output (e.g. you need the `air`/trigger words before `generate_image`).
+- **Before using any model/LoRA/embedding, read how to apply it — don't guess.** Every
+  resource has its own required usage. Pull its page first:
+  - `get_model_version(id)` → `air`, `baseModel` (family → prompt dialect), files.
+  - `get_model(id)` → description with **trigger words**, recommended sampler/CFG/steps,
+    and version list.
+  - `get_model_images(model_id=…)` → real example generations **with their `meta`**
+    (prompt, negative, sampler, steps, CFG, seed) — copy proven settings from these.
+  A LoRA without its trigger words, or a checkpoint run with the wrong family's prompt
+  style/CFG, will look broken even though the API call "succeeds". Reading the page first
+  is not optional.
+
+---
+
 ## 0. The loop (always do this)
 
 1. **Find a checkpoint** — `search_models(query=…, types="Checkpoint", base_models=…, sort="Most Downloaded")`.
