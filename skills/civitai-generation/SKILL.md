@@ -74,7 +74,7 @@ which of these you're on. Prompt style and settings differ hard between them.
 | **SDXL 1.0** (base/realistic) | `sdxl` | 1024×1024 | tags **or** natural language | 6–8 | **no clip_skip** (400s on SDXL) |
 | **Pony V6** (SDXL) | `sdxl` | 1024×1024 | `score_*` + `rating_*` + `source_*` + tags | 7 | see §3 — special prompt dialect |
 | **Illustrious / NoobAI** (SDXL anime) | `sdxl` | 1024-ish | **danbooru tags** + quality stack + `rating:` | 4–7 | see §4; NoobAI **v-pred** wants CFG 3.5–5 |
-| **Flux.1 D** | `flux1` | 1024×1024 | **natural language sentences** | 1 (no neg) | ~3.5 "guidance"; no negative prompt, no clip skip |
+| **Flux.1 D** | `flux1` | 1024×1024 | **natural language sentences** | ~3.5 | this is distilled *guidance*, not real CFG; **no negative prompt**, no clip skip, no weight syntax |
 
 If unsure of the family, `search_models` result and `get_model_version.baseModel`
 state it. **Pony and Illustrious are both `sdxl` ecosystem but prompt completely
@@ -122,7 +122,10 @@ Practical defaults:
 - **Anime (Pony / Illustrious / NoobAI):** `euler_a` (sdcpp) or `euler_ancestral` (comfy).
 - **Realistic SDXL:** `dpm++2m` + `karras` (comfy `dpmpp_2m` + `karras`) for crisp detail.
 - **LCM/Turbo/Lightning checkpoints:** `sampler="lcm"`, low steps (4–8), low CFG (1–2).
-- **v-prediction NoobAI:** `euler_a`, 28 steps, CFG 3.5–5.
+- **v-prediction NoobAI:** `euler_a` or `ddim`, 28–35 steps, CFG 3.5–5.
+  ⚠️ **v-pred does NOT support Karras schedulers** — use `discrete`/`simple`/`sgm_uniform`,
+  not `karras`, or you get unstable/burnt output. (Some UIs also apply "CFG rescale ≈0.2"
+  for v-pred; the orchestration API may not expose it — if colors oversaturate, lower CFG.)
 
 ---
 
@@ -186,12 +189,18 @@ cfg_scale: 5, steps: 28, sampler: "euler_a", width: 832, height: 1216
 ```
 
 ### 4.4 Flux.1 D — natural language
-Flux wants **descriptive sentences**, not tag soup, and has **no negative prompt**
-(guidance ~1). No clip_skip. Fewer steps (20–28).
+Flux uses a T5 text encoder (like an LLM), so it wants **descriptive sentences**, not
+tag soup. **No negative prompt, no `(weight:1.2)` syntax, no clip_skip.**
+- `cfg_scale` ≈ **3.5** (distilled guidance). 7+ (SD habit) → oversaturated/artifacts.
+- Steps 20–28. Length 50–150 words; **front-load** the key subject/action/style.
+- Say what you **want**, not what to avoid (no negatives): instead of "not blurry" →
+  "sharp focus, crisp detail". For photoreal add camera/lens ("shot on 85mm, f/1.8").
+- No weight syntax → express emphasis in words ("with strong emphasis on …").
 ```
-prompt: "A photorealistic portrait of a woman standing in a neon-lit cyberpunk alley
-         at night, rain reflections on the pavement, shallow depth of field, 85mm lens."
-cfg_scale: 1, steps: 24
+prompt: "A photorealistic portrait of a woman standing in a neon-lit cyberpunk alley at
+         night, rain reflections on the pavement, shallow depth of field, shot on 85mm f/1.8,
+         sharp focus, cinematic color grading."
+cfg_scale: 3.5, steps: 24
 ```
 
 ---
@@ -204,6 +213,35 @@ cfg_scale: 1, steps: 24
   section (very strong isolation).
 - Keep weights ~0.7–1.5. Stacking too many >1.3 fries the image.
 Flux does **not** use this syntax — describe emphasis in words.
+
+**Weighting discipline (from community best practice):**
+- Prefer explicit `(word:1.4)` over nested `((((word))))` — nesting is guesswork math.
+- `1.2–1.3` minor/persistent nudges · `1.4–1.6` major recurring problems (hands, complex
+  anatomy) · `1.7+` only as a nuclear "must eliminate" — it distorts nearby tokens.
+- **SDXL is less sensitive to weighted negatives than SD1.5** — on SDXL a plain,
+  unweighted negative list often beats heavily weighted one.
+
+---
+
+## 5.5 Best practices (hard-won)
+
+- **Front-load what matters.** Models weight earlier tokens more; put subject → key
+  action → critical style first, secondary details last.
+- **Fewer, precise tags beat tag spam** (especially Illustrious/NoobAI). If the prompt is
+  painful to read, trim it — more tags ≠ better.
+- **Steal proven settings.** Before inventing params, `get_model_images(model_id=…)` and
+  copy the `meta` (sampler/steps/CFG/seed) from a good example on that exact model.
+- **Negative embeddings are ecosystem-specific.** `EasyNegative`/`bad_prompt` are **SD1.5**;
+  on SDXL use an SDXL-trained negative embedding or a plain negative list — an SD1 embedding
+  silently does nothing on SDXL.
+- **Iterate one variable at a time**, seed pinned. Find a good seed at low steps, then
+  raise steps / add detail. Don't change prompt + sampler + CFG at once.
+- **Match CFG to the checkpoint type**, not a fixed habit: base SD1/SDXL 6–8, v-pred 3.5–5,
+  Turbo/LCM 1–2, Flux ~3.5. Wrong CFG is the #1 cause of burnt or mushy output.
+- **Hands/anatomy** are the top failure on explicit poses: strong negatives
+  (`bad hands, extra digits, fused fingers`) + reroll seed beats fighting with weights.
+- **Batch cheaply.** Roll `quantity` 2–4 at low steps to explore, then re-render the best
+  seed at full steps — cheaper than many one-off high-step calls.
 
 ---
 
@@ -327,5 +365,9 @@ generate_image(prompt="<new style/scene>", model_version_id=<ver>,
 
 ## Sources
 - Pony score/source/rating syntax: civitai.com/articles/8547, /articles/4248
-- Illustrious/NoobAI tips: civitai.com/articles/19107 (login), NoobAI v-pred settings
+- Illustrious/NoobAI tips & v-pred settings: civitai.com/articles/19107, /articles/10226
+  (v-pred: no Karras, CFG 3.5–5, rescale ≈0.2)
+- SDXL weighting/negative-embedding best practice (2026 community guides)
+- Flux prompting best practice: getimg.ai / BFL prompting guide (T5, CFG ≈3.5,
+  natural language, no negatives, no weight syntax)
 - Orchestration params & sampler/scheduler enums: developer.civitai.com/orchestration
