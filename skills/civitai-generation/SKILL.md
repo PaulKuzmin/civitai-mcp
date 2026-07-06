@@ -263,6 +263,21 @@ Flux does **not** use this syntax — describe emphasis in words.
   trigger words) and put them in the `prompt`. A LoRA with no effect usually means a
   missing trigger, wrong ecosystem, or weight too low.
 
+#### Prompt economy — don't over-describe what the tag/LoRA already knows
+Use the **canonical danbooru tag first**; let the model/LoRA render its own detail.
+Verbose, non-tag descriptions of a concept act as **noise** and often make it *worse*,
+because the model was never trained on that phrasing and it fights what the LoRA encodes.
+
+> **Verified example** (Illustrious + a dedicated `garter belt` LoRA @1.0, same seed):
+> - `garter belt` → clean, coherent straps and clips.
+> - `garter belt with four suspenders clips` → messier: extra/floating straps, clips that
+>   don't attach properly. The extra words degraded the exact thing they tried to specify.
+
+Rule of thumb: **start minimal (canonical tag) → only expand the description if it
+actually doesn't render what you want.** If it still fails, prefer, in order: (1) bump
+the tag weight `(garter belt:1.1)`, (2) raise LoRA weight, (3) find a LoRA for that
+specific sub-variant — *before* piling on descriptive words. More words ≠ more control.
+
 ### Embeddings (textual inversion, `embeddings`)
 - `embeddings=["<versionId or AIR>", …]`. Reference the embedding **by its name in the
   prompt / negative prompt** (e.g. a negative-quality embedding goes in `negative_prompt`).
