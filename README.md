@@ -189,6 +189,15 @@ claude mcp add civitai -e CIVITAI_API_KEY=<ваш-ключ> -- H:/CivitaiMcp/.ve
 
 `401` — неверный ключ · `403` — early-access/ограничение автора · `429` — лимит 24ч.
 
+## Скилл: как правильно генерировать
+
+[`skills/civitai-generation/SKILL.md`](skills/civitai-generation/SKILL.md) — глубокий
+гайд по параметрам генерации: выбор семейства модели (SD1.5 / SDXL / Pony / Illustrious /
+NoobAI / Flux) и его диалект промпта, сэмплеры/планировщики, CFG/steps/резолюции, LoRA/
+embeddings/VAE, img2img и NSFW-конвенции (`score_*`, `rating_explicit`, danbooru-теги).
+Составлен по материалам Civitai. Агент-клиент (Claude Code и т.п.) подхватывает скилл
+из папки `skills/` — либо скопируйте её в свой каталог скиллов.
+
 ## Лицензия
 
 [MIT](LICENSE).
