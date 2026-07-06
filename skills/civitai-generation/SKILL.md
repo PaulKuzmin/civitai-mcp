@@ -51,9 +51,13 @@ This skill drives the **`civitai` MCP** (`generate_image`, `estimate_generation`
    (needed for generation) and the model's `baseModel` (tells you the family).
    For LoRAs, the model page lists **trigger words** — always read them.
 3. **Identify the family** (see §1) — this decides prompt style, resolution, CFG, sampler.
-4. **Estimate cost** — `estimate_generation(...)` (whatif, no Buzz spent). Check
-   `cost.breakdown[].accountType` to see which wallet pays (yellow = anything incl.
-   NSFW, green = SFW only, blue = free SFW).
+4. **Estimate cost** — `estimate_generation(...)` (whatif, no Buzz spent). `cost.buzz`
+   is accurate. `cost.breakdown[].accountType` is only *indicative* — the real debit may
+   land on a different eligible wallet at run time. **Observed via the orchestration API:
+   wallet routing is NOT strictly gated by content rating** — an explicit (`rating_explicit`)
+   Pony render was charged to **blue**, and estimates often say blue regardless. Don't rely
+   on a rating→wallet mapping for the API path; just make sure *some* wallet has funds
+   (`get_buzz_balance`).
 5. **Generate** — `generate_image(..., confirm=true, save_dir=…)`. Without
    `confirm=true` it only previews the price.
 6. If it 5xx/timeouts, poll `get_workflow(workflowId)`.
@@ -293,8 +297,10 @@ generate_image(prompt="…", model_version_id=…, operation="createVariant",
 - **Anatomy tags:** use danbooru vocabulary for pose/acts/anatomy (these models were
   trained on those exact tags — precise danbooru tags >> euphemisms). Search danbooru
   for the correct tag if unsure.
-- **Wallet:** explicit generation is billed to **yellow** Buzz (or blue for SFW). Green
-  can't fund NSFW. `estimate_generation` shows `accountType` in the breakdown.
+- **Wallet:** on the website NSFW is a yellow-Buzz thing, but **via the orchestration API
+  the wallet is not rating-gated** — an explicit render was observed billing **blue**. So
+  any funded wallet works; just check `get_buzz_balance` before a batch. (`estimate_generation`
+  `accountType` is indicative only — see §0.4.)
 - **Quality:** add strong negatives for hands/anatomy (`bad hands, extra digits,
   fused fingers, bad anatomy`) — the most common failure on explicit poses.
 
